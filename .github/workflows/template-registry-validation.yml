@@ -3,7 +3,7 @@ on:
   push:
     branches: [qa/template-registry-20260922]
 permissions:
-  contents: write
+  contents: read
 jobs:
   validate:
     runs-on: ubuntu-24.04
@@ -11,247 +11,59 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: fix-jdt-template-registry-api
           fetch-depth: 2
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '21'
-      - name: Prepare the isolated source fix
+      - name: Obtain JGit p2 snapshot using the upstream EGit CI procedure
         shell: bash
         run: |
           set -euo pipefail
-          git worktree add --detach "$RUNNER_TEMP/registry-fix" 8b73b644705f7b1a9f50eae79b77c310604ee782
-          export FIX_ROOT="$RUNNER_TEMP/registry-fix"
           python3 - <<'PY'
           import os
+          import urllib.request
+          import xml.etree.ElementTree as ET
+          import zipfile
           from pathlib import Path
-          root = Path(os.environ['FIX_ROOT'])
-          file = root / 'org.eclipse.egit.ui/src/org/eclipse/egit/ui/internal/StartEventListener.java'
-          text = file.read_text()
-          text = text.replace('import org.eclipse.e4.ui.workbench.UIEvents;', 'import org.eclipse.core.runtime.Platform;\nimport org.eclipse.e4.ui.workbench.UIEvents;')
-          text = text.replace('import org.eclipse.jface.text.templates.TemplateContextType;', 'import org.eclipse.jdt.core.manipulation.JavaManipulation;\nimport org.eclipse.jface.text.templates.TemplateContextType;')
-          text = text.replace('import org.osgi.service.component.annotations.Component;', 'import org.osgi.framework.Bundle;\nimport org.osgi.framework.BundleException;\nimport org.osgi.service.component.annotations.Component;')
-          old_guard = '\t\tif (!Activator.hasJavaPlugin()) {'
-          assert text.count(old_guard) == 1
-          text = text.replace(old_guard, '\t\tBundle javaUi = Platform.getBundle("org.eclipse.jdt.ui"); //$NON-NLS-1$\n\t\tif (javaUi == null) {')
-          begin = text.index('\t\t\t\tContextTypeRegistry codeTemplateContextRegistry = org.eclipse.jdt.internal.ui.JavaPlugin')
-          end = text.index('\n\t\t\t} catch (Throwable e)', begin)
-          registration = text[begin:end]
-          old_getter = ('\t\t\t\tContextTypeRegistry codeTemplateContextRegistry = org.eclipse.jdt.internal.ui.JavaPlugin\n'
-                        '\t\t\t\t\t\t.getDefault().getCodeTemplateContextRegistry();')
-          assert registration.startswith(old_getter)
-          body = registration[len(old_getter):]
-          body = '\n'.join(line[2:] if line.startswith('\t\t') else line for line in body.split('\n'))
-          helper = '''
-          \t/**
-          \t * Registers the resolvers after JDT UI has initialized the public registry.
-          \t */
-          \tstatic void registerTemplateVariableResolvers(Bundle javaUi)
-          \t\t\tthrows BundleException {
-          \t\t// The public getter does not activate JDT UI or initialize its registry.
-          \t\t// Do not change the bundle's persistent autostart setting.
-          \t\tjavaUi.start(Bundle.START_TRANSIENT);
-          \t\tContextTypeRegistry codeTemplateContextRegistry = JavaManipulation
-          \t\t\t\t.getCodeTemplateContextRegistry();
-          \t\tif (codeTemplateContextRegistry == null) {
-          \t\t\tthrow new IllegalStateException(
-          \t\t\t\t\t"JDT UI did not initialize the code template context registry"); //$NON-NLS-1$
-          \t\t}
-          ''' + body.lstrip('\n') + '\n\t}\n'
-          text = text[:begin] + '\t\t\t\tregisterTemplateVariableResolvers(javaUi);' + text[end:]
-          assert text.endswith('}\n')
-          file.write_text(text[:-2] + helper + '}\n')
-          manifest = root / 'org.eclipse.egit.ui/META-INF/MANIFEST.MF'
-          text = manifest.read_text()
-          needle = ' org.eclipse.jdt.ui;bundle-version="[3.35.0,4.0.0)";resolution:=optional,'
-          assert text.count(needle) == 1
-          manifest.write_text(text.replace(needle, ' org.eclipse.jdt.core.manipulation;bundle-version="[1.11.0,2.0.0)";resolution:=optional,\n' + needle))
-          manifest = root / 'org.eclipse.egit.ui.test/META-INF/MANIFEST.MF'
-          text = manifest.read_text()
-          needle = ' org.eclipse.jdt.launching;bundle-version="[3.23.300,4.0.0)",'
-          assert text.count(needle) == 1
-          manifest.write_text(text.replace(needle, needle + '\n org.eclipse.jdt.core.manipulation;bundle-version="[1.11.0,2.0.0)",'))
-          test = root / 'org.eclipse.egit.ui.test/src/org/eclipse/egit/ui/internal/StartEventListenerTest.java'
-          assert not test.exists()
-          test.parent.mkdir(parents=True, exist_ok=True)
-          test.write_text('''/*******************************************************************************
-           * Copyright (c) 2026 Carsten Hammer and others.
-           *
-           * All rights reserved. This program and the accompanying materials
-           * are made available under the terms of the Eclipse Public License 2.0
-           * which accompanies this distribution, and is available at
-           * https://www.eclipse.org/legal/epl-2.0/
-           *
-           * SPDX-License-Identifier: EPL-2.0
-           *******************************************************************************/
-          package org.eclipse.egit.ui.internal;
-          
-          import static org.junit.Assert.assertEquals;
-          import static org.junit.Assert.assertNotNull;
-          import static org.junit.Assert.assertSame;
-          import static org.junit.Assert.assertThrows;
-          import static org.junit.Assert.assertTrue;
-          import static org.mockito.Mockito.doAnswer;
-          import static org.mockito.Mockito.doThrow;
-          import static org.mockito.Mockito.mock;
-          import static org.mockito.Mockito.mockStatic;
-          import static org.mockito.Mockito.verify;
-          import static org.mockito.Mockito.when;
-          import static org.mockito.Mockito.withSettings;
-          
-          import java.util.Iterator;
-          import java.util.concurrent.atomic.AtomicBoolean;
-          
-          import org.eclipse.core.resources.IProject;
-          import org.eclipse.core.runtime.IAdaptable;
-          import org.eclipse.egit.core.project.RepositoryMapping;
-          import org.eclipse.egit.ui.internal.variables.GitTemplateVariableResolver;
-          import org.eclipse.jdt.core.manipulation.JavaManipulation;
-          import org.eclipse.jface.text.templates.TemplateBuffer;
-          import org.eclipse.jface.text.templates.TemplateContext;
-          import org.eclipse.jface.text.templates.TemplateContextType;
-          import org.eclipse.jface.text.templates.TemplateTranslator;
-          import org.eclipse.jface.text.templates.TemplateVariableResolver;
-          import org.eclipse.jgit.api.Git;
-          import org.eclipse.text.templates.ContextTypeRegistry;
-          import org.junit.Rule;
-          import org.junit.Test;
-          import org.junit.rules.TemporaryFolder;
-          import org.mockito.MockedStatic;
-          import org.osgi.framework.Bundle;
-          import org.osgi.framework.BundleException;
-          
-          public class StartEventListenerTest {
-          
-          \t@Rule
-          \tpublic TemporaryFolder temporaryFolder = new TemporaryFolder();
-          
-          \t@Test
-          \tpublic void registersResolversAfterActivatingJdtUi() throws Exception {
-          \t\tBundle javaUi = mock(Bundle.class);
-          \t\tAtomicBoolean activated = new AtomicBoolean();
-          \t\tdoAnswer(invocation -> {
-          \t\t\tactivated.set(true);
-          \t\t\treturn null;
-          \t\t}).when(javaUi).start(Bundle.START_TRANSIENT);
-          
-          \t\tContextTypeRegistry registry = new ContextTypeRegistry();
-          \t\tTemplateContextType first = new TemplateContextType("first");
-          \t\tTemplateContextType second = new TemplateContextType("second");
-          \t\tTemplateVariableResolver existing = new TemplateVariableResolver("existing", "existing");
-          \t\tfirst.addResolver(existing);
-          \t\tregistry.addContextType(first);
-          \t\tregistry.addContextType(second);
-          
-          \t\t// Static mocks are thread-scoped. Never replace JDT's process-wide registry.
-          \t\ttry (MockedStatic<JavaManipulation> manipulation = mockStatic(JavaManipulation.class)) {
-          \t\t\tmanipulation.when(JavaManipulation::getCodeTemplateContextRegistry).thenAnswer(invocation -> {
-          \t\t\t\tassertTrue("Registry read before JDT UI activation", activated.get());
-          \t\t\t\treturn registry;
-          \t\t\t});
-          \t\t\tStartEventListener.registerTemplateVariableResolvers(javaUi);
-          \t\t\tassertTrue(findResolver(first, "git_config") instanceof GitTemplateVariableResolver);
-          \t\t\tassertTrue(findResolver(second, "git_config") instanceof GitTemplateVariableResolver);
-          \t\t\tassertSame(existing, findResolver(first, "existing"));
-          \t\t\tassertEquals(2, resolverCount(first));
-          \t\t\tassertEquals(1, resolverCount(second));
-          \t\t\tverify(javaUi).start(Bundle.START_TRANSIENT);
-          \t\t}
-          \t}
-          
-          \t@Test
-          \tpublic void propagatesActivationFailureWithoutReadingRegistry() throws Exception {
-          \t\tBundle javaUi = mock(Bundle.class);
-          \t\tBundleException failure = new BundleException("Cannot activate JDT UI");
-          \t\tdoThrow(failure).when(javaUi).start(Bundle.START_TRANSIENT);
-          \t\ttry (MockedStatic<JavaManipulation> manipulation = mockStatic(JavaManipulation.class)) {
-          \t\t\tassertSame(failure, assertThrows(BundleException.class,
-          \t\t\t\t\t() -> StartEventListener.registerTemplateVariableResolvers(javaUi)));
-          \t\t\tmanipulation.verifyNoInteractions();
-          \t\t}
-          \t}
-          
-          \t@Test
-          \tpublic void reportsMissingRegistryInsteadOfSilentlySkippingRegistration() throws Exception {
-          \t\tBundle javaUi = mock(Bundle.class);
-          \t\ttry (MockedStatic<JavaManipulation> manipulation = mockStatic(JavaManipulation.class)) {
-          \t\t\tmanipulation.when(JavaManipulation::getCodeTemplateContextRegistry).thenReturn(null);
-          \t\t\tassertThrows(IllegalStateException.class,
-          \t\t\t\t\t() -> StartEventListener.registerTemplateVariableResolvers(javaUi));
-          \t\t\tverify(javaUi).start(Bundle.START_TRANSIENT);
-          \t\t}
-          \t}
-          
-          \t@Test
-          \tpublic void registeredResolverExpandsRepositoryConfiguration() throws Exception {
-          \t\tContextTypeRegistry registry = new ContextTypeRegistry();
-          \t\tTemplateContextType type = new TemplateContextType("code-template");
-          \t\tregistry.addContextType(type);
-          \t\tIProject project = mock(IProject.class);
-          \t\tTemplateContext context = mock(TemplateContext.class,
-          \t\t\t\twithSettings().extraInterfaces(IAdaptable.class));
-          \t\twhen(((IAdaptable) context).getAdapter(IProject.class)).thenReturn(project);
-          \t\tRepositoryMapping mapping = mock(RepositoryMapping.class);
-          
-          \t\ttry (Git git = Git.init().setDirectory(temporaryFolder.newFolder("repository")).call();
-          \t\t\t\tMockedStatic<JavaManipulation> manipulation = mockStatic(JavaManipulation.class);
-          \t\t\t\tMockedStatic<RepositoryMapping> mappings = mockStatic(RepositoryMapping.class)) {
-          \t\t\tgit.getRepository().getConfig().setString("user", null, "name", "Template Author");
-          \t\t\tgit.getRepository().getConfig().save();
-          \t\t\twhen(mapping.getRepository()).thenReturn(git.getRepository());
-          \t\t\tmappings.when(() -> RepositoryMapping.getMapping(project)).thenReturn(mapping);
-          \t\t\tmanipulation.when(JavaManipulation::getCodeTemplateContextRegistry).thenReturn(registry);
-          
-          \t\t\tStartEventListener.registerTemplateVariableResolvers(mock(Bundle.class));
-          \t\t\tassertNotNull(findResolver(type, "git_config"));
-          \t\t\tTemplateBuffer buffer = new TemplateTranslator().translate("${author:git_config(user.name)}");
-          \t\t\ttype.resolve(buffer, context);
-          \t\t\tassertEquals("Template Author", buffer.getString());
-          \t\t}
-          \t}
-          
-          \tprivate static TemplateVariableResolver findResolver(TemplateContextType context, String type) {
-          \t\tfor (Iterator<TemplateVariableResolver> it = context.resolvers(); it.hasNext();) {
-          \t\t\tTemplateVariableResolver resolver = it.next();
-          \t\t\tif (type.equals(resolver.getType())) {
-          \t\t\t\treturn resolver;
-          \t\t\t}
-          \t\t}
-          \t\treturn null;
-          \t}
-          
-          \tprivate static int resolverCount(TemplateContextType context) {
-          \t\tint count = 0;
-          \t\tfor (Iterator<TemplateVariableResolver> it = context.resolvers(); it.hasNext();) {
-          \t\t\tit.next();
-          \t\t\tcount++;
-          \t\t}
-          \t\treturn count;
-          \t}
-          }
-          ''')
+          ns = {'m': 'http://maven.apache.org/POM/4.0.0'}
+          version = ET.parse('pom.xml').getroot().findtext('m:version', namespaces=ns)
+          assert version and version.endswith('-SNAPSHOT'), version
+          base = ('https://repo.eclipse.org/repository/jgit-maven2-snapshots/'
+                  'org/eclipse/jgit/org.eclipse.jgit.repository/' + version)
+          with urllib.request.urlopen(base + '/maven-metadata.xml', timeout=90) as response:
+              metadata = ET.fromstring(response.read())
+          versions = [entry.findtext('value') for entry in metadata.findall('.//snapshotVersion')
+                      if entry.findtext('extension') == 'zip' and not entry.findtext('classifier')]
+          assert versions, ET.tostring(metadata, encoding='unicode')
+          url = base + '/org.eclipse.jgit.repository-' + versions[-1] + '.zip'
+          print('JGit p2 snapshot:', url)
+          root = Path(os.environ['RUNNER_TEMP']) / 'jgit-p2'
+          root.mkdir()
+          archive = root.parent / 'jgit-p2.zip'
+          urllib.request.urlretrieve(url, archive)
+          with zipfile.ZipFile(archive) as z:
+              z.extractall(root)
+          assert any((root / name).is_file() for name in ['content.jar', 'content.xml', 'content.xml.xz']), list(root.iterdir())
+          with open(os.environ['GITHUB_ENV'], 'a') as env:
+              env.write('JGIT_SITE=' + root.as_uri() + '\n')
           PY
-          cd "$FIX_ROOT"
-          git diff --check
-          git diff --stat
-          git add org.eclipse.egit.ui org.eclipse.egit.ui.test
-          git diff --cached > "$RUNNER_TEMP/registry-fix.patch"
-          git -c user.name='Carsten Hammer' -c user.email='carsten.hammer@t-online.de' commit -s -m 'Use public JDT code template registry API' -m 'Activate JDT UI transiently before reading JavaManipulation.getCodeTemplateContextRegistry(), keep Java integration optional, and avoid the binary-incompatible internal getter. Test activation ordering, failures, resolver registration and Git configuration expansion without replacing the shared JDT registry.' -m 'Fixes eclipse-egit/egit#210' -m 'Assisted-by: OpenAI ChatGPT'
-          git push origin HEAD:refs/heads/fix-jdt-template-registry-api
-          git rev-parse HEAD
       - name: Build and run the template registry regression tests
         shell: bash
         run: |
           set -euo pipefail
-          cd "$RUNNER_TEMP/registry-fix"
-          xvfb-run -a mvn -B -ntp -Djgit-site=https://download.eclipse.org/jgit/updates-nightly -Dtest=StartEventListenerTest -DfailIfNoTests=false verify 2>&1 | tee "$RUNNER_TEMP/registry-tests.log"
+          git rev-parse HEAD
+          git diff --check HEAD^
+          xvfb-run -a mvn -B -ntp -Djgit-site="$JGIT_SITE" -Dtest=StartEventListenerTest -DfailIfNoTests=false -pl org.eclipse.egit.ui.test -am verify 2>&1 | tee "$RUNNER_TEMP/registry-tests.log"
       - name: Preserve validation evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: template-registry-validation
           path: |
-            ${{ runner.temp }}/registry-fix.patch
             ${{ runner.temp }}/registry-tests.log
-            ${{ runner.temp }}/registry-fix/**/target/surefire-reports/**
+            **/target/surefire-reports/**
+            **/target/work/data/.metadata/.log
+          include-hidden-files: true
           if-no-files-found: warn
