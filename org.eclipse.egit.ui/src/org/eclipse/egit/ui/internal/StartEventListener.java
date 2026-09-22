@@ -13,16 +13,20 @@ package org.eclipse.egit.ui.internal;
 import java.util.Iterator;
 import java.util.concurrent.atomic.AtomicBoolean;
 
+import org.eclipse.core.runtime.Platform;
 import org.eclipse.e4.ui.workbench.UIEvents;
 import org.eclipse.egit.core.JobFamilies;
 import org.eclipse.egit.ui.Activator;
 import org.eclipse.egit.ui.internal.selection.SelectionRepositoryStateCache;
 import org.eclipse.egit.ui.internal.variables.GitTemplateVariableResolver;
+import org.eclipse.jdt.core.manipulation.JavaManipulation;
 import org.eclipse.jface.text.templates.TemplateContextType;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.text.templates.ContextTypeRegistry;
 import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.progress.IProgressService;
+import org.osgi.framework.Bundle;
+import org.osgi.framework.BundleException;
 import org.osgi.service.component.annotations.Component;
 import org.osgi.service.component.annotations.Deactivate;
 import org.osgi.service.event.Event;
@@ -93,23 +97,13 @@ public class StartEventListener implements EventHandler {
 	}
 
 	private void registerTemplateVariableResolvers() {
-		if (!Activator.hasJavaPlugin()) {
+		Bundle javaUi = Platform.getBundle("org.eclipse.jdt.ui"); //$NON-NLS-1$
+		if (javaUi == null) {
 			return;
 		}
 		runAsync(() -> {
 			try {
-				ContextTypeRegistry codeTemplateContextRegistry = org.eclipse.jdt.internal.ui.JavaPlugin
-						.getDefault().getCodeTemplateContextRegistry();
-				Iterator<TemplateContextType> ctIter = codeTemplateContextRegistry
-						.contextTypes();
-
-				while (ctIter.hasNext()) {
-					TemplateContextType contextType = ctIter
-							.next();
-					contextType.addResolver(new GitTemplateVariableResolver(
-							"git_config", //$NON-NLS-1$
-							UIText.GitTemplateVariableResolver_GitConfigDescription));
-				}
+				registerTemplateVariableResolvers(javaUi);
 			} catch (Throwable e) {
 				// while catching Throwable is an anti-pattern, we may
 				// experience NoClassDefFoundErrors here
@@ -118,5 +112,31 @@ public class StartEventListener implements EventHandler {
 						e);
 			}
 		});
+	}
+
+	/**
+	 * Registers the resolvers after JDT UI has initialized the public registry.
+	 */
+	static void registerTemplateVariableResolvers(Bundle javaUi)
+			throws BundleException {
+		// The public getter does not activate JDT UI or initialize its registry.
+		// Do not change the bundle's persistent autostart setting.
+		javaUi.start(Bundle.START_TRANSIENT);
+		ContextTypeRegistry codeTemplateContextRegistry = JavaManipulation
+				.getCodeTemplateContextRegistry();
+		if (codeTemplateContextRegistry == null) {
+			throw new IllegalStateException(
+					"JDT UI did not initialize the code template context registry"); //$NON-NLS-1$
+		}
+		Iterator<TemplateContextType> ctIter = codeTemplateContextRegistry
+				.contextTypes();
+
+		while (ctIter.hasNext()) {
+			TemplateContextType contextType = ctIter
+					.next();
+			contextType.addResolver(new GitTemplateVariableResolver(
+					"git_config", //$NON-NLS-1$
+					UIText.GitTemplateVariableResolver_GitConfigDescription));
+		}
 	}
 }
