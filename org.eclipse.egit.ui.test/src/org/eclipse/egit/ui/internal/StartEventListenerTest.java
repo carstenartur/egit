@@ -21,13 +21,11 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
-import static org.mockito.Mockito.withSettings;
 
 import java.util.Iterator;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.eclipse.core.resources.IProject;
-import org.eclipse.core.runtime.IAdaptable;
 import org.eclipse.egit.core.project.RepositoryMapping;
 import org.eclipse.egit.ui.internal.variables.GitTemplateVariableResolver;
 import org.eclipse.jdt.core.manipulation.JavaManipulation;
@@ -62,7 +60,7 @@ public class StartEventListenerTest {
 		ContextTypeRegistry registry = new ContextTypeRegistry();
 		TemplateContextType first = new TemplateContextType("first");
 		TemplateContextType second = new TemplateContextType("second");
-		TemplateVariableResolver existing = new TemplateVariableResolver("existing", "existing");
+		TemplateVariableResolver existing = new GitTemplateVariableResolver("existing", "existing");
 		first.addResolver(existing);
 		registry.addContextType(first);
 		registry.addContextType(second);
@@ -112,9 +110,8 @@ public class StartEventListenerTest {
 		TemplateContextType type = new TemplateContextType("code-template");
 		registry.addContextType(type);
 		IProject project = mock(IProject.class);
-		TemplateContext context = mock(TemplateContext.class,
-				withSettings().extraInterfaces(IAdaptable.class));
-		when(((IAdaptable) context).getAdapter(IProject.class)).thenReturn(project);
+		TemplateContext context = mock(TemplateContext.class);
+		when(context.getAdapter(IProject.class)).thenReturn(project);
 		RepositoryMapping mapping = mock(RepositoryMapping.class);
 
 		try (Git git = Git.init().setDirectory(temporaryFolder.newFolder("repository")).call();
