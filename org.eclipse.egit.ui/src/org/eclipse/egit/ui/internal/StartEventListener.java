@@ -116,6 +116,13 @@ public class StartEventListener implements EventHandler {
 
 	/**
 	 * Registers the resolvers after JDT UI has initialized the public registry.
+	 *
+	 * @param javaUi
+	 *            the installed JDT UI bundle
+	 * @throws BundleException
+	 *             if the JDT UI bundle cannot be activated
+	 * @throws IllegalStateException
+	 *             if JDT UI did not initialize its code template registry
 	 */
 	static void registerTemplateVariableResolvers(Bundle javaUi)
 			throws BundleException {
